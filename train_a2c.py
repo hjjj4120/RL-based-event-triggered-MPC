@@ -169,7 +169,7 @@ def main():
                 print('---------------------------------------')
 
             max_step = len(rl)
-            eval_error = np.array(rl[:max_step]) - 4 * np.sin(2 * np.pi / 50 * np.array(x[:max_step]))
+            eval_error = np.array(rl[:max_step]) - np.array(gt[:max_step])
 
             with open(dir_name + '/train_logs.csv', 'a+', newline='') as write_obj:
                 csv_writer = csv.writer(write_obj)

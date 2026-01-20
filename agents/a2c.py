@@ -148,7 +148,7 @@ class Agent(object):
       # save logs
       x = [state[0]]
       rl = [state[2]]  # rl output
-      gt = [4 * np.sin(2 * np.pi / 50 * state[0])]  # ground truth
+      gt = [self.env.reference(state[0])]  # ground truth
       act = []
       jmpcs = []
       self.policy.eval()
@@ -156,7 +156,7 @@ class Agent(object):
          # _, pi, _ = self.policy(torch.Tensor(state).to(self.device))
          # action = pi.argmax().detach().cpu().numpy()
          action = self.select_action(torch.Tensor(state).to(self.device))
-         next_state, reward, done, (t, jmpc) = self.env.step(action)
+         next_state, reward, done, info = self.env.step(action)
 
          total_reward += reward
          step_number += 1
@@ -165,7 +165,7 @@ class Agent(object):
          act.append(action)
          x.append(next_state[0])
          rl.append(next_state[2])
-         gt.append(4 * np.sin(2 * np.pi / 50 * next_state[0]))
-         jmpcs.append(jmpc)
+         gt.append(self.env.reference(next_state[0]))
+         jmpcs.append(info["jmpc"])
 
       return step_number, total_reward, (act, x, rl, gt, jmpcs)

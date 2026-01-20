@@ -1,4 +1,5 @@
 
+import time
 import torch
 import numpy as np
 from scipy import integrate
@@ -6,6 +7,8 @@ import casadi, mpctools as mpc
 import matplotlib.pyplot as plt
 import os
 import random
+
+from paths.path_set import PathSampler, curriculum_path_pool, all_paths
 
 # Define parameters
 pi = np.pi
@@ -114,10 +117,9 @@ def veh_rhs(x0, t, u0, param=param_plant, vx=10):
 # print(aux)
 
 # System parameters.
-"""change MPC prediction horizon"""
-p = 5  #10  # MPC prediction horizon
-Nx = 6  #
-Nu = 2  ###change from 1 to 2
+DEFAULT_P = 5
+Nx = 6
+Nu = 2
 dt = 0.2
 
 
@@ -134,42 +136,72 @@ f = mpc.getCasadiFunc(ode, [Nx, Nu], ["x", "u"], rk4=True, Delta=dt, M=4)
 
 # Initial condition, bounds, etc.
 x0 = np.array([0, 10, 0, -0.0691, 0.2343, -0.0123])
-x = np.zeros((p + 1, Nx))
-u = np.zeros((p, Nu))
-x[0, :] = x0
-for t in range(p):
-    x[t + 1, :] = np.squeeze(f(x[t, :], u[t, :]))
-guess = dict(x=x, u=u)
 # lower and upper bounds for states and actions
-lb = dict(x=np.array([-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf]), u=np.array([-50,-0.54105]))
-ub = dict(x=np.array([np.inf, np.inf, np.inf, np.inf, np.inf, np.inf]), u=np.array([50,0.54105]))
-udiscrete = np.array([False,False])
+lb = dict(x=np.array([-np.inf, -np.inf, -np.inf, -np.inf, -np.inf, -np.inf]), u=np.array([-50, -0.54105]))
+ub = dict(x=np.array([np.inf, np.inf, np.inf, np.inf, np.inf, np.inf]), u=np.array([50, 0.54105]))
+udiscrete = np.array([False, False])
 
 
-# Stage cost.
-def stagecost(x, u):
-    """Quadratic stage cost."""
-    return 2.0 * (x[2] - 4 * np.sin(2 * pi / 50 * x[0])) ** 2 + + 1e-6 * u[0] ** 2 + 0.001 * u[1] ** 2#3.0 * u[0] ** 2
+def make_guess(horizon):
+    x = np.zeros((horizon + 1, Nx))
+    u = np.zeros((horizon, Nu))
+    x[0, :] = x0
+    for t in range(horizon):
+        x[t + 1, :] = np.squeeze(f(x[t, :], u[t, :]))
+    return dict(x=x, u=u)
 
 
-l = mpc.getCasadiFunc(stagecost, [Nx, Nu], ["x", "u"])
+def make_stagecost(ref_func):
+    def stagecost(x, u):
+        """Quadratic stage cost."""
+        return 2.0 * (x[2] - ref_func(x[0])) ** 2 + 1e-6 * u[0] ** 2 + 0.001 * u[1] ** 2
+    return stagecost
 
-# Create controller.
-N = dict(x=Nx, u=Nu, t=p)
-cont = mpc.nmpc(f, l, N, x0, lb, ub, guess, udiscrete=udiscrete)
+
+def make_controller(horizon, ref_func):
+    l = mpc.getCasadiFunc(make_stagecost(ref_func), [Nx, Nu], ["x", "u"])
+    N = dict(x=Nx, u=Nu, t=horizon)
+    guess = make_guess(horizon)
+    return mpc.nmpc(f, l, N, x0, lb, ub, guess, udiscrete=udiscrete)
 
 
 class vehEnv:
-    def __init__(self, T=20, rho=0, x0=[0, 10, 0, -0.0691, 0.2343, -0.0123]):
+    def __init__(
+        self,
+        T=20,
+        rho=0,
+        x0=None,
+        sph=0,
+        np_eco=DEFAULT_P,
+        np_pro=DEFAULT_P,
+        path_set="single",
+        curriculum=0,
+        domain_rand=0,
+        seed=0,
+        difficulty=1.0,
+        total_episodes=500,
+    ):
         self.T = T
         self.rho = rho
         self.dt = dt
-        self.x0 = x0
-        self.p = p
-        self.action_space = 2
+        self.x0 = x0 if x0 is not None else [0, 10, 0, -0.0691, 0.2343, -0.0123]
+        self.np_eco = np_eco
+        self.np_pro = np_pro
+        self.sph = sph
+        self.path_set = path_set
+        self.curriculum = curriculum
+        self.domain_rand = domain_rand
+        self.difficulty = difficulty
+        self.total_episodes = max(1, total_episodes)
+        self.path_sampler = PathSampler(seed=seed)
+        self.rng = np.random.RandomState(seed)
+        self.action_space = 3 if sph else 2
         self.obs_space = 12
         """change the code stop threshold"""
         self.threshold_error = 100
+        self.max_horizon = max(self.np_eco, self.np_pro, DEFAULT_P)
+        self.current_horizon = DEFAULT_P
+        self.ref_path = None
 
     def connect(self):
         pass
@@ -177,29 +209,59 @@ class vehEnv:
     def loadInitState(self, iniStateName):
         pass
 
-    def reset(self):
-        # TODO: add random noise
-        self.x = self.x0
+    def reset(self, episode_idx=0):
+        self._select_path(episode_idx)
+        self.x = np.array(self.x0, dtype=np.float64)
+        if self.domain_rand:
+            noise = self.rng.normal(scale=0.05 * self.difficulty, size=len(self.x))
+            self.x = self.x + noise
         self.k = 0
-        self.useq = np.zeros([p, Nu])
-        self.xseq = np.zeros([p, Nx])
+        self.useq = np.zeros([self.max_horizon, Nu])
+        self.xseq = np.zeros([self.max_horizon, Nx])
         self.t = 0.
+        self.current_horizon = DEFAULT_P
         return self.getFeat()
 
     def getFeat(self):
         return np.concatenate((self.x, self.xseq[self.k]))  #, axis=1
 
     def step(self, action):
-        if action > 0:
-            cont = mpc.nmpc(f, l, N, self.x, lb, ub, guess, udiscrete=udiscrete)
-            cont.solve()
-            self.useq = cont.vardict["u"]
-            self.xseq = cont.vardict["x"]
-            self.k = 0
+        solve_time_ms = 0.0
+        solve_ok = True
+        if self.sph:
+            solve_action = action in (1, 2)
+            horizon = self.np_eco if action == 1 else self.np_pro
+        else:
+            solve_action = action > 0
+            horizon = DEFAULT_P
+
+        if solve_action:
+            self.current_horizon = horizon
+            start_time = time.perf_counter()
+            try:
+                cont = make_controller(horizon, self.ref_path.ref)
+                cont.solve()
+                solve_ok = True
+                solve_time_ms = (time.perf_counter() - start_time) * 1000.0
+                useq = cont.vardict["u"]
+                xseq = cont.vardict["x"]
+            except Exception:
+                solve_ok = False
+                solve_time_ms = (time.perf_counter() - start_time) * 1000.0
+                useq = None
+                xseq = None
+
+            if useq is not None:
+                self.useq[:horizon] = useq
+                self.xseq[:horizon + 1] = xseq
+                if horizon < self.max_horizon:
+                    self.useq[horizon:] = useq[-1]
+                    self.xseq[horizon + 1:] = xseq[-1]
+                self.k = 0
         else:
             self.k += 1
-            if self.k > self.p - 1:
-                self.k = self.p - 1
+            if self.k > self.current_horizon - 1:
+                self.k = self.current_horizon - 1
 
         u = self.useq[self.k]
         t = np.linspace(self.t, self.t + dt, 10)
@@ -208,13 +270,13 @@ class vehEnv:
         self.t += self.dt
 
         # Reward should be calculated using current state as forward Euler is using.
-        reward = stagecost(self.x, u) * self.dt * (-1) - self.rho * action
-        jmpc = stagecost(self.x, u) * self.dt * (-1)
+        reward = self._stagecost(self.x, u) * self.dt * (-1) - self.rho * action
+        jmpc = self._stagecost(self.x, u) * self.dt * (-1)
         next_state = self.getFeat()
         current_time = torch.tensor(self.t)
 
         # TODO: are there any other terminal conditions
-        tracking_error = (next_state[2] - 4 * np.sin(2 * np.pi / 50 * np.array(next_state[0]))) ** 2
+        tracking_error = (next_state[2] - self.ref_path.ref(next_state[0])) ** 2
         if self.t >= self.T:
             done = True
         elif tracking_error > self.threshold_error:
@@ -223,10 +285,34 @@ class vehEnv:
         else:
             done = False
 
-        return next_state, reward, done, (current_time, jmpc)
+        info = {
+            "time": current_time,
+            "jmpc": jmpc,
+            "solve_time_ms": solve_time_ms,
+            "solve_ok": solve_ok,
+        }
+        return next_state, reward, done, info
 
     def close(self,):
         pass
+
+    def _stagecost(self, x, u):
+        return 2.0 * (x[2] - self.ref_path.ref(x[0])) ** 2 + 1e-6 * u[0] ** 2 + 0.001 * u[1] ** 2
+
+    def _select_path(self, episode_idx):
+        if self.path_set == "single":
+            pool = ["dang_single"]
+        else:
+            if self.curriculum:
+                progress = min(1.0, max(0.0, episode_idx / max(1, self.total_episodes - 1)))
+                pool = curriculum_path_pool(progress)
+            else:
+                pool = all_paths()
+        name = pool[self.rng.randint(len(pool))]
+        self.ref_path = self.path_sampler.sample(name, domain_rand=bool(self.domain_rand))
+
+    def reference(self, x):
+        return self.ref_path.ref(x)
 
 
 if __name__ == "__main__":
@@ -244,11 +330,11 @@ if __name__ == "__main__":
     cloud_return = 0
     cloud_obs, cloud_a, cloud_all_u = [], [], []
     while not done:
-        state, reward, done, u = vehEnv.step(1)
+        state, reward, done, info = vehEnv.step(1)
         cloud_return += reward
         cloud_obs.append(state)
         cloud_a.append(1)
-        cloud_all_u.append(np.array(u))
+        cloud_all_u.append(np.array(info["jmpc"]))
 
     print("Return for MPC:", cloud_return)
     np.save('runs' + '/Veh/ob_history', cloud_obs)

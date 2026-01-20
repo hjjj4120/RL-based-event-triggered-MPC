@@ -239,13 +239,13 @@ class BaseAgent(ABC):
         # save logs
         x = [state[0]]
         rl = [state[2]]  # rl output
-        gt = [4 * np.sin(2 * np.pi / 50 * state[0])]  # ground truth
+        gt = [self.test_env.reference(state[0])]  # ground truth
         act = []
         jmpcs = []
 
         while not done:
             action = self.exploit(state)
-            next_state, reward, done, (t, jmpc) = self.test_env.step(action)
+            next_state, reward, done, info = self.test_env.step(action)
             num_steps += 1
             episode_return += reward
             state = next_state
@@ -253,8 +253,8 @@ class BaseAgent(ABC):
             act.append(action)
             x.append(next_state[0])
             rl.append(next_state[2])
-            gt.append(4 * np.sin(2 * np.pi / 50 * next_state[0]))
-            jmpcs.append(jmpc)
+            gt.append(self.test_env.reference(next_state[0]))
+            jmpcs.append(info["jmpc"])
 
         self.writer.add_scalar(
             'reward/test_return', episode_return, self.episodes)
@@ -262,7 +262,7 @@ class BaseAgent(ABC):
             'reward/test_steps', num_steps, self.episodes)
 
         max_step = len(rl)
-        eval_error = np.array(rl[:max_step]) - 4 * np.sin(2 * np.pi / 50 * np.array(x[:max_step]))
+        eval_error = np.array(rl[:max_step]) - np.array(gt[:max_step])
 
         save_mat = {
             'act': act,
@@ -301,21 +301,21 @@ class BaseAgent(ABC):
         # save logs
         x = [state[0]]
         rl = [state[2]]  # rl output
-        gt = [4 * np.sin(2 * np.pi / 50 * state[0])]  # ground truth
+        gt = [self.test_env.reference(state[0])]  # ground truth
         act = []
         jmpcs = []
 
         while not done:
             action = self.explore(state)
-            next_state, reward, done, (t, jmpc) = self.test_env.step(action)
+            next_state, reward, done, info = self.test_env.step(action)
             episode_return += reward
             state = next_state
 
             act.append(action)
             x.append(next_state[0])
             rl.append(next_state[2])
-            gt.append(4 * np.sin(2 * np.pi / 50 * next_state[0]))
-            jmpcs.append(jmpc)
+            gt.append(self.test_env.reference(next_state[0]))
+            jmpcs.append(info["jmpc"])
 
         print("episode reward", episode_return)
         plt.figure(1)
@@ -333,7 +333,7 @@ class BaseAgent(ABC):
         plt.xlabel('Time (s)')
         plt.ylabel('lateral error')
         xi = np.arange(0, 20, 0.2)
-        plt.plot(xi, smooth(np.array(rl[:100]) - 4 * np.sin(2 * np.pi / 50 * np.array(x[:100]))), label='error')
+        plt.plot(xi, smooth(np.array(rl[:100]) - np.array(gt[:100])), label='error')
         plt.legend()
         plt.show()
 
