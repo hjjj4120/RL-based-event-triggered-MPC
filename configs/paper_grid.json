@@ -1,0 +1,30 @@
+{
+  "episodes": 500,
+  "seeds": [0, 1, 2],
+  "runs": [
+    {
+      "name": "baseline_single",
+      "sph": 0,
+      "path_set": "single"
+    },
+    {
+      "name": "baseline_multi",
+      "sph": 0,
+      "path_set": "multi"
+    },
+    {
+      "name": "sph_single",
+      "sph": 1,
+      "path_set": "single",
+      "np_eco": 10,
+      "np_pro": 30
+    },
+    {
+      "name": "sph_multi",
+      "sph": 1,
+      "path_set": "multi",
+      "np_eco": 10,
+      "np_pro": 30
+    }
+  ]
+}
